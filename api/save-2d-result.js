@@ -1,9 +1,8 @@
-// api/save-2d-result.js
 const { Redis } = require('@upstash/redis');
 
 const redis = new Redis({
-    url: process.env.OTHER_KV_REST_API_URL,   // တခြား API ရဲ့ ဒေတာဘေ့စ် URL
-    token: process.env.OTHER_KV_REST_API_TOKEN, // တခြား API ရဲ့ ဒေတာဘေ့စ် Token
+    url: process.env.KV_REST_API_URL,   
+    token: process.env.KV_REST_API_TOKEN, 
 });
 
 module.exports = async (req, res) => {
