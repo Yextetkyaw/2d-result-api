@@ -16,8 +16,7 @@ module.exports = async (req, res) => {
         return res.status(200).end();
     }
 
-    // 🌟 ၁။ Browser ကနေ ဒီအတိုင်း Link ကို ဝင်ကြည့်လျှင် (GET Method)
-    // ဒေတာဘေ့စ်ထဲက noon_result ရော evening_result ပါ ဆွဲထုတ်ပြီး ပြသပေးမည်။
+        // 🌟 ၁။ Browser ကနေ ဒီအတိုင်း Link ကို ဝင်ကြည့်လျှင် (GET Method)
     if (req.method === 'GET') {
         try {
             let storedNoon = await redis.get('noon_result');
@@ -26,14 +25,31 @@ module.exports = async (req, res) => {
             let storedEvening = await redis.get('evening_result');
             if (storedEvening && typeof storedEvening === 'string') storedEvening = JSON.parse(storedEvening);
 
-            return res.status(200).json({
-                noon_result: storedNoon || null,
-                evening_result: storedEvening || null
-            });
+            // ရရှိလာတဲ့ ဒေတာထဲက တစ်ခုခုဆီကနေ ရက်စွဲ (Date) ကို ယူပါတယ်။ ဒေတာမရှိရင် လက်ရှိ Today Date ကို သုံးပါတယ်။
+            let resultDate = "-";
+            if (storedNoon && storedNoon.date) {
+                resultDate = storedNoon.date;
+            } else if (storedEvening && storedEvening.date) {
+                resultDate = storedEvening.date;
+            } else {
+                // ဒေတာ လုံးဝမရှိသေးပါက လက်ရှိစက်ရဲ့ ရက်စွဲကို ယူခြင်း (YYYY-MM-DD ဖော်မတ်)
+                resultDate = new Date().toISOString().split('T')[0];
+            }
+
+            // ရက်စွဲ Object အောက်ထဲသို့ ထည့်သွင်းတည်ဆောက်ခြင်း
+            const formattedResponse = {
+                [resultDate]: {
+                    noon_result: storedNoon || null,
+                    evening_result: storedEvening || null
+                }
+            };
+
+            return res.status(200).json(formattedResponse);
         } catch (error) {
             return res.status(500).json({ error: 'Failed to fetch data', details: error.message });
         }
     }
+    
 
     // 🌟 ၂။ ပထမ API ကနေ ဒေတာလှမ်းပို့သိမ်းလျှင် (POST Method)
     if (req.method === 'POST') {
