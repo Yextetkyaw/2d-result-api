@@ -25,18 +25,15 @@ module.exports = async (req, res) => {
             let storedEvening = await redis.get('evening_result');
             if (storedEvening && typeof storedEvening === 'string') storedEvening = JSON.parse(storedEvening);
 
-            // ရရှိလာတဲ့ ဒေတာထဲက တစ်ခုခုဆီကနေ ရက်စွဲ (Date) ကို ယူပါတယ်။ ဒေတာမရှိရင် လက်ရှိ Today Date ကို သုံးပါတယ်။
-            let resultDate = "-";
+            let resultDate = null; // 👈 မူလကနဦး တန်ဖိုးကို null ဟု သတ်မှတ်ထားမည်။
+
             if (storedNoon && storedNoon.date) {
                 resultDate = storedNoon.date;
             } else if (storedEvening && storedEvening.date) {
                 resultDate = storedEvening.date;
-            } else {
-                // ဒေတာ လုံးဝမရှိသေးပါက လက်ရှိစက်ရဲ့ ရက်စွဲကို ယူခြင်း (YYYY-MM-DD ဖော်မတ်)
-                resultDate = new Date().toISOString().split('T')[0];
             }
 
-            // ရက်စွဲ Object အောက်ထဲသို့ ထည့်သွင်းတည်ဆောက်ခြင်း
+            // ရက်စွဲရှိရင် ရလာတဲ့ ရက်စွဲကို သုံးပြီး၊ မရှိရင် "null" ဆိုတဲ့ Key အောက်ထဲ ထည့်မည်။
             const formattedResponse = {
                 [resultDate]: {
                     noon_result: storedNoon || null,
@@ -50,7 +47,6 @@ module.exports = async (req, res) => {
         }
     }
     
-
     // 🌟 ၂။ ပထမ API ကနေ ဒေတာလှမ်းပို့သိမ်းလျှင် (POST Method)
     if (req.method === 'POST') {
         // လုံခြုံရေးအတွက် Secret Token စစ်ဆေးခြင်း
