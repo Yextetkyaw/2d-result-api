@@ -1,10 +1,12 @@
-// api/save-2d-result.js
 const { Redis } = require('@upstash/redis');
 
 const redis = new Redis({
     url: process.env.KV_REST_API_URL || process.env.OTHER_KV_REST_API_URL,   
     token: process.env.KV_REST_API_TOKEN || process.env.OTHER_KV_REST_API_TOKEN, 
 });
+
+// Redis ထဲမှာ သုံးမယ့် Key Name
+const REDIS_KEY = 'twod_results_set';
 
 module.exports = async (req, res) => {
     // CORS Headers 
@@ -16,30 +18,29 @@ module.exports = async (req, res) => {
         return res.status(200).end();
     }
 
-        // 🌟 ၁။ Browser ကနေ ဒီအတိုင်း Link ကို ဝင်ကြည့်လျှင် (GET Method)
+    // 🌟 ၁။ Browser ကနေ ဒေတာပြန်တောင်းခြင်း (GET Method)
+    // အသစ်ဆုံးဒေတာကို ထိပ်ဆုံးကပြပြီး စုစုပေါင်း ၃၆၅ ရက်စာပဲ ပြန်ပေးမည်။
     if (req.method === 'GET') {
         try {
-            let storedNoon = await redis.get('noon_result');
-            if (storedNoon && typeof storedNoon === 'string') storedNoon = JSON.parse(storedNoon);
+            // zrange သုံးပြီး Score အများဆုံး (အသစ်ဆုံး) ကနေ အနည်းဆုံး (အဟောင်းဆုံး) ကို ဆွဲထုတ်မည်။
+            // Upstash JSON ပြန်ပေးသည့် format အပေါ်မူတည်၍ rev: true ထည့်ထားသည်။
+            const rawData = await redis.zrange(REDIS_KEY, 0, 364, { rev: true });
 
-            let storedEvening = await redis.get('evening_result');
-            if (storedEvening && typeof storedEvening === 'string') storedEvening = JSON.parse(storedEvening);
+            // Frontend က သုံးရလွယ်အောင် Object Format ပြောင်းပေးခြင်း
+            const formattedResponse = {};
 
-            let resultDate = null; // 👈 မူလကနဦး တန်ဖိုးကို null ဟု သတ်မှတ်ထားမည်။
+            if (rawData && rawData.length > 0) {
+                rawData.forEach(item => {
+                    // Upstash က data ကို parse လုပ်ပြီးသား ပေးနိုင်သလို string အနေနဲ့လည်း ပေးနိုင်၍ စစ်ဆေးခြင်း
+                    const parsedItem = typeof item === 'string' ? JSON.parse(item) : item;
+                    const dateKey = parsedItem.date;
 
-            if (storedNoon && storedNoon.date) {
-                resultDate = storedNoon.date;
-            } else if (storedEvening && storedEvening.date) {
-                resultDate = storedEvening.date;
+                    formattedResponse[dateKey] = {
+                        noon_result: parsedItem.noon_result || null,
+                        evening_result: parsedItem.evening_result || null
+                    };
+                });
             }
-
-            // ရက်စွဲရှိရင် ရလာတဲ့ ရက်စွဲကို သုံးပြီး၊ မရှိရင် "null" ဆိုတဲ့ Key အောက်ထဲ ထည့်မည်။
-            const formattedResponse = {
-                [resultDate]: {
-                    noon_result: storedNoon || null,
-                    evening_result: storedEvening || null
-                }
-            };
 
             return res.status(200).json(formattedResponse);
         } catch (error) {
@@ -49,7 +50,6 @@ module.exports = async (req, res) => {
     
     // 🌟 ၂။ ပထမ API ကနေ ဒေတာလှမ်းပို့သိမ်းလျှင် (POST Method)
     if (req.method === 'POST') {
-        // လုံခြုံရေးအတွက် Secret Token စစ်ဆေးခြင်း
         const secretToken = req.headers['authorization'];
         if (secretToken !== 'Bearer MY_SECRET_KEY_123') {
             return res.status(401).json({ error: 'Unauthorized' });
@@ -61,16 +61,52 @@ module.exports = async (req, res) => {
                 bodyData = JSON.parse(bodyData);
             }
 
-            const { type, data } = bodyData; 
+            const { type, data } = bodyData; // type: 'noon' သို့မဟုတ် 'evening', data: { date: '2026-06-22', ... }
 
-            if (!type || !data) {
-                return res.status(400).json({ error: 'Missing type or data' });
+            if (!type || !data || !data.date) {
+                return res.status(400).json({ error: 'Missing type, data or date' });
             }
 
-            // ဒေတာဘေ့စ်ထဲသို့ သိမ်းဆည်းခြင်း
-            await redis.set(`${type}_result`, JSON.stringify(data));
+            const targetDate = data.date; // ဥပမာ - "2026-06-22"
+            const score = new Date(targetDate).getTime(); // Date ကို စီဖို့အတွက် Timestamp ပြောင်းခြင်း
 
-            return res.status(200).json({ success: true, message: `${type} result saved.` });
+            // ၁။ အဲဒီရက်စွဲအတွက် ရှိပြီးသား ဒေတာ ဟောင်း ရှိမရှိ အရင်ရှာစစ်မယ်
+            const allItems = await redis.zrange(REDIS_KEY, 0, -1);
+            let existingRecord = { date: targetDate, noon_result: null, evening_result: null };
+
+            if (allItems && allItems.length > 0) {
+                const found = allItems.find(item => {
+                    const parsed = typeof item === 'string' ? JSON.parse(item) : item;
+                    return parsed.date === targetDate;
+                });
+
+                if (found) {
+                    existingRecord = typeof found === 'string' ? JSON.parse(found) : found;
+                    // လက်ရှိအဟောင်းကို ဒေတာအသစ်နဲ့ မထပ်အောင် ခဏ ဖျက်ထုတ်လိုက်မယ်
+                    await redis.zrem(REDIS_KEY, JSON.stringify(found));
+                }
+            }
+
+            // ၂။ ဒေတာအသစ် (noon သို့မဟုတ် evening) ကို Update လုပ်မယ်
+            if (type === 'noon') {
+                existingRecord.noon_result = data;
+            } else if (type === 'evening') {
+                existingRecord.evening_result = data;
+            }
+
+            // ၃။ ဒေတာဘေ့စ်ထဲကို Sorted Set အနေနဲ့ ပြန်ထည့်မယ် (Score က နေ့ရက် Timestamp ဖြစ်လို့ အော်တို စီသွားမယ်)
+            await redis.zadd(REDIS_KEY, { score: score, member: JSON.stringify(existingRecord) });
+
+            // ၄။ ⚠️ ၃၆၅ ရက်ထက် ကျော်သွားတဲ့ အဟောင်းဆုံး ဒေတာတွေကို ဖျက်ထုတ်ပစ်ခြင်း
+            // Score အနည်းဆုံး (အဟောင်းဆုံး) ကောင်တွေကို ဖျက်တာဖြစ်ပြီး Rank (0 ကနေ စုစုပေါင်းထဲက ၃၆၅ ခု ချန်ပြီး ကျန်တာဖျက်)
+            const totalElements = await redis.zcard(REDIS_KEY);
+            if (totalElements > 365) {
+                const excessCount = totalElements - 365;
+                // အောက်ဆုံးက အဟောင်းဆုံး 'excessCount' အရေအတွက်ကို ဖျက်မယ်
+                await redis.zremrangebyrank(REDIS_KEY, 0, excessCount - 1);
+            }
+
+            return res.status(200).json({ success: true, message: `${type} result saved for ${targetDate}.` });
         } catch (error) {
             return res.status(500).json({ error: 'Server Internal Error', details: error.message });
         }
