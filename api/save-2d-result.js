@@ -6,7 +6,7 @@ const redis = new Redis({
     token: process.env.KV_REST_API_TOKEN || process.env.OTHER_KV_REST_API_TOKEN, 
 });
 
-const REDIS_ZSET_KEY = 'twod_results_zset';
+const DATES_ZSET_KEY = 'twod_dates_zset';
 const MAX_DAYS = 365;
 
 module.exports = async (req, res) => {
@@ -17,23 +17,27 @@ module.exports = async (req, res) => {
 
     if (req.method === 'OPTIONS') return res.status(200).end();
 
-    // 🌟 ၁။ GET Method - ရက်စွဲအလိုက် အသစ်ဆုံးမှ အဟောင်းဆုံး စီထွက်လာမည်
+    // 🌟 ၁။ GET Method - ရက်စွဲအလိုက် ဒေတာများကို အသစ်ဆုံးမှ အဟောင်းဆုံး စီထုတ်ပေးမည်
     if (req.method === 'GET') {
         try {
-            // Upstash မှာ zrevrange အစား zrange ကို { rev: true } ထည့်သုံးရပါတယ်
-            const rawList = await redis.zrange(REDIS_ZSET_KEY, 0, MAX_DAYS - 1, { rev: true });
+            // ရက်စွဲစာရင်းကို အသစ်ဆုံးမှ အဟောင်းဆုံး အရင်ဆွဲထုတ်မည်
+            const dates = await redis.zrange(DATES_ZSET_KEY, 0, MAX_DAYS - 1, { rev: true });
             
             const formattedResponse = {};
-            if (rawList && rawList.length > 0) {
-                rawList.forEach(item => {
-                    let parsedItem = typeof item === 'string' ? JSON.parse(item) : item;
-                    const { date, noon_result, evening_result } = parsedItem;
-                    if (date) {
-                        formattedResponse[date] = {
-                            noon_result: noon_result || null,
-                            evening_result: evening_result || null
-                        };
-                    }
+
+            if (dates && dates.length > 0) {
+                // ရက်စွဲတစ်ခုချင်းစီရဲ့ ဒေတာကို Multi-get (MGET) ဖြင့် တစ်ပြိုင်နက် ဆွဲထုတ်မည်
+                const keys = dates.map(date => `twod:data:${date}`);
+                const dataResults = await redis.mget(...keys);
+
+                dates.forEach((date, index) => {
+                    let dayData = dataResults[index];
+                    if (typeof dayData === 'string') dayData = JSON.parse(dayData);
+
+                    formattedResponse[date] = {
+                        noon_result: dayData?.noon_result || null,
+                        evening_result: dayData?.evening_result || null
+                    };
                 });
             }
 
@@ -43,7 +47,7 @@ module.exports = async (req, res) => {
         }
     }
     
-    // 🌟 ၂။ POST Method - ဘယ်လိုပဲထည့်ထည့် ရက်စွဲ (Date) အတိုင်းပဲ စီသွားမည်
+    // 🌟 ၂။ POST Method - ဘယ်လိုပဲထည့်ထည့် ရက်စွဲအလိုက် စီသွားမည်
     if (req.method === 'POST') {
         const secretToken = req.headers['authorization'];
         if (secretToken !== 'Bearer MY_SECRET_KEY_123') {
@@ -61,42 +65,40 @@ module.exports = async (req, res) => {
 
             const targetDate = data.date; 
             const timestamp = new Date(targetDate).getTime(); 
+            const dataKey = `twod:data:${targetDate}`;
 
-            // Redis ထဲမှာ ရှိသမျှ ဒေတာအကုန် ဆွဲထုတ်ပြီး စစ်ဆေးရန် (ရက်စွဲတူ ရှိ/မရှိ)
-            const rawList = await redis.zrange(REDIS_ZSET_KEY, 0, -1);
-            let existingItem = null;
-            let existingDayData = { date: targetDate, noon_result: null, evening_result: null };
-
-            if (rawList && rawList.length > 0) {
-                for (let item of rawList) {
-                    let parsed = typeof item === 'string' ? JSON.parse(item) : item;
-                    if (parsed.date === targetDate) {
-                        existingItem = item; 
-                        existingDayData = parsed;
-                        break;
-                    }
-                }
+            // လက်ရှိရက်စွဲအတွက် ဒေတာ ရှိပြီးသားလား လှမ်းယူမယ်
+            let existingDayData = await redis.get(dataKey);
+            if (typeof existingDayData === 'string') existingDayData = JSON.parse(existingDayData);
+            
+            if (!existingDayData) {
+                existingDayData = { noon_result: null, evening_result: null };
             }
 
-            // ဒေတာအသစ်ကို Update လုပ်ခြင်း
+            // ဒေတာအသစ်ကို ထည့်သွင်းမယ်
             if (type === 'noon') {
                 existingDayData.noon_result = data;
             } else if (type === 'evening') {
                 existingDayData.evening_result = data;
             }
 
-            // ရက်စွဲတူရှိခဲ့ရင် အဟောင်းကို အရင်ဖျက်ထုတ်ပေးရပါတယ်
-            if (existingItem) {
-                await redis.zrem(REDIS_ZSET_KEY, existingItem);
-            }
+            // ၁။ ဒေတာကို ရက်စွဲအလိုက် သီးသန့် Key နဲ့ သိမ်းမယ်
+            await redis.set(dataKey, JSON.stringify(existingDayData));
 
-            // ZADD သုံးပြီး သိမ်းမည်။ Score နေရာမှာ timestamp ကို သုံးထားသည်။
-            await redis.zadd(REDIS_ZSET_KEY, { score: timestamp, member: JSON.stringify(existingDayData) });
+            // ၂။ ရက်စွဲစာရင်း Sorted Set ထဲမှာ ၎င်းရက်စွဲကို Timestamp score ဖြင့် ထည့်မယ် (ရက်စွဲတူရင်自動 overwrite ဖြစ်လို့ စိတ်ချရတယ်)
+            await redis.zadd(DATES_ZSET_KEY, timestamp, targetDate);
 
-            // ၃၆၅ ရက်ကျော်ရင် အဟောင်းဆုံးတွေကို ဖြတ်ထုတ်ခြင်း
-            const totalCount = await redis.zcard(REDIS_ZSET_KEY);
+            // ၃။ ရက်ပေါင်း ၃၆၅ ရက်ထက် ကျော်သွားရင် အဟောင်းဆုံးရက်စွဲတွေကို ဖျက်ပစ်မယ်
+            const totalCount = await redis.zcard(DATES_ZSET_KEY);
             if (totalCount > MAX_DAYS) {
-                await redis.zremrangebyrank(REDIS_ZSET_KEY, 0, totalCount - MAX_DAYS - 1);
+                // အဟောင်းဆုံး ဖြစ်တဲ့ ရက်စွဲတွေကို Sorted Set ထဲက ဖျက်မယ်
+                const expiredDates = await redis.zrange(DATES_ZSET_KEY, 0, totalCount - MAX_DAYS - 1);
+                if (expiredDates && expiredDates.length > 0) {
+                    // သက်ဆိုင်ရာ ဒေတာ Key တွေကိုပါ Database ထဲက ဖျက်ပစ်မယ်
+                    const expiredKeys = expiredDates.map(d => `twod:data:${d}`);
+                    await redis.del(...expiredKeys);
+                    await redis.zremrangebyrank(DATES_ZSET_KEY, 0, totalCount - MAX_DAYS - 1);
+                }
             }
 
             return res.status(200).json({ success: true, message: `${type} result saved for ${targetDate}.` });
