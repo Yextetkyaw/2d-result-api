@@ -6,35 +6,26 @@ const redis = new Redis({
     token: process.env.KV_REST_API_TOKEN || process.env.OTHER_KV_REST_API_TOKEN, 
 });
 
-// Redis ထဲမှာ သိမ်းမယ့် List Key Name
-const REDIS_LIST_KEY = 'twod_results_list';
-const MAX_DAYS = 365; // သိမ်းဆည်းမည့် အများဆုံး ရက်အရေအတွက်
+const REDIS_ZSET_KEY = 'twod_results_zset';
+const MAX_DAYS = 365;
 
 module.exports = async (req, res) => {
-    // CORS Headers 
+    // CORS Headers
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-    if (req.method === 'OPTIONS') {
-        return res.status(200).end();
-    }
+    if (req.method === 'OPTIONS') return res.status(200).end();
 
-    // 🌟 ၁။ ဒေတာအားလုံးကို ရက်စွဲအလိုက် အသစ်ဆုံးမှ အဟောင်းဆုံး စီပြီး ပြန်ထုတ်ပေးခြင်း (GET Method)
+    // 🌟 ၁။ GET Method - ရက်စွဲအလိုက် အသစ်ဆုံးမှ အဟောင်းဆုံး သေချာပေါက် စီထွက်လာမည်
     if (req.method === 'GET') {
         try {
-            // List ထဲက ဒေတာအားလုံး (0 မှ 364 အထိ) ကို ဆွဲထုတ်မည်
-            const rawList = await redis.lrange(REDIS_LIST_KEY, 0, MAX_DAYS - 1);
+            // zrevrange က Score (Timestamp) အကြီးဆုံး (အသစ်ဆုံး) ကနေ အသေးဆုံး (အဟောင်းဆုံး) ကို စီပြီး ထုတ်ပေးပါတယ်
+            const rawList = await redis.zrevrange(REDIS_ZSET_KEY, 0, MAX_DAYS - 1);
             
-            // ရလာတဲ့ Array ကို Object ပုံစံ ပြန်ပြောင်းပေးမည်
             const formattedResponse = {};
-
             rawList.forEach(item => {
-                let parsedItem = item;
-                if (typeof parsedItem === 'string') {
-                    parsedItem = JSON.parse(parsedItem);
-                }
-                
+                let parsedItem = typeof item === 'string' ? JSON.parse(item) : item;
                 const { date, noon_result, evening_result } = parsedItem;
                 if (date) {
                     formattedResponse[date] = {
@@ -50,7 +41,7 @@ module.exports = async (req, res) => {
         }
     }
     
-    // 🌟 ၂။ ပထမ API ကနေ ဒေတာလှမ်းပို့သိမ်းလျှင် (POST Method)
+    // 🌟 ၂။ POST Method - ဘယ်လိုပဲထည့်ထည့် ရက်စွဲ (Date) အတိုင်းပဲ စီသွားမည်
     if (req.method === 'POST') {
         const secretToken = req.headers['authorization'];
         if (secretToken !== 'Bearer MY_SECRET_KEY_123') {
@@ -59,53 +50,53 @@ module.exports = async (req, res) => {
 
         try {
             let bodyData = req.body;
-            if (typeof bodyData === 'string') {
-                bodyData = JSON.parse(bodyData);
-            }
+            if (typeof bodyData === 'string') bodyData = JSON.parse(bodyData);
 
-            const { type, data } = bodyData; // type: 'noon' သို့မဟုတ် 'evening', data: { date: '2026-06-22', ... }
-
+            const { type, data } = bodyData; 
             if (!type || !data || !data.date) {
                 return res.status(400).json({ error: 'Missing type, data or date' });
             }
 
-            const targetDate = data.date;
-
-            // ၁။ လက်ရှိ ရှိပြီးသား ဒေတာစာရင်းကို ယူရမည် (တစ်ရက်တည်းမှာ noon ကော evening ကော ရှိနိုင်လို့ စစ်ဆေးရန်)
-            const rawList = await redis.lrange(REDIS_LIST_KEY, 0, MAX_DAYS - 1);
+            const targetDate = data.date; // ဥပမာ - "2026-06-22"
             
-            let existingIndex = -1;
+            // ရက်စွဲကို နှိုင်းယှဉ်လို့ရတဲ့ ဂဏန်း (Timestamp) ပြောင်းလဲခြင်း
+            const timestamp = new Date(targetDate).getTime(); 
+
+            // Redis ထဲမှာ ဒီရက်စွဲနဲ့ ဒေတာ ရှိပြီးသားလား အရင်စစ်ဆေးမယ်
+            const rawList = await redis.zrevrange(REDIS_ZSET_KEY, 0, -1);
+            let existingItem = null;
             let existingDayData = { date: targetDate, noon_result: null, evening_result: null };
 
-            // ယနေ့ရက်စွဲနဲ့ ဒေတာ ရှိပြီးသားလား ရှာဖွေခြင်း
-            for (let i = 0; i < rawList.length; i++) {
-                let currentItem = typeof rawList[i] === 'string' ? JSON.parse(rawList[i]) : rawList[i];
-                if (currentItem.date === targetDate) {
-                    existingIndex = i;
-                    existingDayData = currentItem;
+            for (let item of rawList) {
+                let parsed = typeof item === 'string' ? JSON.parse(item) : item;
+                if (parsed.date === targetDate) {
+                    existingItem = item; 
+                    existingDayData = parsed;
                     break;
                 }
             }
 
-            // ၂။ ဒေတာအသစ်ကို Update လုပ်ခြင်း
+            // ဒေတာအသစ်ကို နေ့လယ်/ညနေ အလိုက် ခွဲထည့်မယ်
             if (type === 'noon') {
                 existingDayData.noon_result = data;
             } else if (type === 'evening') {
                 existingDayData.evening_result = data;
             }
 
-            if (existingIndex !== -1) {
-                // ရှိပြီးသား ရက်စွဲဆိုရင် ၎င်း Index နေရာမှာ ဒေတာ အဟောင်းကို ဖျက်ပြီး အသစ်ပြန်သွင်းရန်
-                // ပိုမိုလွယ်ကူစေရန် List တစ်ခုလုံးကို Update လုပ်ပေးခြင်း (သိုမဟုတ် LSET သုံးနိုင်သည်)
-                // သို့သော် ဒေတာအသစ်ဆုံးကို အပေါ်မှာ ထားချင်တာ ဖြစ်လို့ ရှိပြီးသားဒေတာကို ဖျက်ပြီး ထိပ်ဆုံးကို ပို့ပေးခြင်းက ပိုကောင်းပါတယ်
-                await redis.lrem(REDIS_LIST_KEY, 1, rawList[existingIndex]);
+            // တကယ်လို့ ရက်စွဲတူဒေတာ ရှိခဲ့ရင် အဟောင်းကို အရင်ဖျက်ထုတ်ပေးရပါတယ် (Redis Member တူသွားအောင်လို့ပါ)
+            if (existingItem) {
+                await redis.zrem(REDIS_ZSET_KEY, existingItem);
             }
 
-            // ဒေတာကို List ရဲ့ ထိပ်ဆုံး (အပေါ်ဆုံး) သို့ တွန်းထည့်မည်
-            await redis.lpush(REDIS_LIST_KEY, JSON.stringify(existingDayData));
+            // ZADD သုံးပြီး သိမ်းမယ်။ Score နေရာမှာ timestamp (ရက်စွဲတန်ဖိုး) ကို သုံးထားလို့ အလိုအလျောက် စီသွားပါလိမ့်မယ်
+            await redis.zadd(REDIS_ZSET_KEY, { score: timestamp, member: JSON.stringify(existingDayData) });
 
-            // ၃။ ဒေတာအရေအတွက် ၃၆၅ ခုထက် ကျော်သွားရင် အောက်ဆုံးက အဟောင်းဆုံးတွေကို ဖြတ်ပစ်မည်
-            await redis.ltrim(REDIS_LIST_KEY, 0, MAX_DAYS - 1);
+            // ၃။ ရက်ပေါင်း ၃၆၅ ရက်ထက် ကျော်သွားရင် အဟောင်းဆုံးရက်စွဲတွေကို အလိုအလျောက် ဖြတ်ထုတ်ခြင်း
+            const totalCount = await redis.zcard(REDIS_ZSET_KEY);
+            if (totalCount > MAX_DAYS) {
+                // Score အနည်းဆုံး (အဟောင်းဆုံးရက်စွဲ) ကောင်တွေကို ရှာဖျက်တာ ဖြစ်လို့ ရက်စွဲအဟောင်းတွေပဲ ပြုတ်သွားမှာပါ
+                await redis.zremrangebyrank(REDIS_ZSET_KEY, 0, totalCount - MAX_DAYS - 1);
+            }
 
             return res.status(200).json({ success: true, message: `${type} result saved for ${targetDate}.` });
         } catch (error) {
